@@ -1,0 +1,51 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+package(default_visibility = ["//visibility:public"])
+
+go_binary(
+    name = "merge_json_deps",
+    embed = [":common_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_library(
+    name = "vta_analyzer_lib",
+    srcs = ["vta_analyzer_tool.go"],
+    importpath = "github.com/example/aspects-test-golang/aspects/golang/common/vta",
+    deps = [
+        "@org_golang_x_tools//go/callgraph/cha",
+        "@org_golang_x_tools//go/callgraph/vta",
+        "@org_golang_x_tools//go/packages",
+        "@org_golang_x_tools//go/ssa/ssautil",
+    ],
+)
+
+go_binary(
+    name = "vta_analyzer_tool",
+    embed = [":vta_analyzer_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_binary(
+    name = "vta_analyzer_bazel",
+    srcs = ["vta_analyzer_bazel.go"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@org_golang_x_tools//go/callgraph/cha",
+        "@org_golang_x_tools//go/callgraph/vta",
+        "@org_golang_x_tools//go/packages",
+        "@org_golang_x_tools//go/ssa/ssautil",
+    ],
+)
+
+go_binary(
+    name = "vta_analyzer_simple",
+    srcs = ["vta_analyzer_simple.go"],
+    visibility = ["//visibility:public"],
+)
+
+go_library(
+    name = "common_lib",
+    srcs = ["merge_json_deps.go"],
+    importpath = "github.com/example/aspects-test-golang/aspects/golang/common",
+)
