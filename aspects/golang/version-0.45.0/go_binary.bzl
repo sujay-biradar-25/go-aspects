@@ -267,54 +267,70 @@ def _create_package_info_with_sources(ctx):
         "ExportFile": "",
     }
     
-    # Add basic stdlib packages for VTA to work
-    stdlib_packages = _get_stdlib_packages()
+    # Collect all Go dependencies from the Bazel dependency graph
+    all_packages = [main_package]
     
-    all_packages = [main_package] + stdlib_packages
+    # Helper function to extract Go package info from a target
+    def extract_go_package_info(target, target_label):
+        if hasattr(target, "files"):
+            # Check if any files end with .go
+            has_go_files = False
+            for f in target.files.to_list():
+                if f.path.endswith(".go"):
+                    has_go_files = True
+                    break
+            
+            if has_go_files:
+                pkg_path = target_label.package
+                return {
+                    "ID": str(target_label),
+                    "Name": target_label.name,
+                    "PkgPath": pkg_path,
+                    "GoFiles": [],
+                    "CompiledGoFiles": [],
+                    "Imports": {},
+                    "ExportFile": "",
+                }
+        return None
     
-    # Create the response structure
+    # Collect dependencies from embed attribute (go_library targets)
+    if hasattr(ctx.rule.attr, "embed"):
+        for embed_dep in ctx.rule.attr.embed:
+            # Add the embedded library itself
+            pkg_info = extract_go_package_info(embed_dep, embed_dep.label)
+            if pkg_info:
+                all_packages.append(pkg_info)
+            
+            # Also collect dependencies of the embedded library through the rule attribute
+            if hasattr(embed_dep, "attr") and hasattr(embed_dep.attr, "deps"):
+                for nested_dep in embed_dep.attr.deps:
+                    nested_pkg_info = extract_go_package_info(nested_dep, nested_dep.label)
+                    if nested_pkg_info:
+                        all_packages.append(nested_pkg_info)
+    
+    # Collect dependencies from direct deps attribute
+    if hasattr(ctx.rule.attr, "deps"):
+        for dep in ctx.rule.attr.deps:
+            pkg_info = extract_go_package_info(dep, dep.label)
+            if pkg_info:
+                all_packages.append(pkg_info)
+    
+    # TODO: Recursively collect transitive dependencies
+    # For now, we'll let the VTA analyzer discover packages through Go's module system
+    
+    # Create the response structure with dynamic values
+    # The VTA analyzer will detect architecture at runtime
     response = {
         "NotHandled": False,
         "Compiler": "gc",
-        "Arch": "arm64",
+        "Arch": "auto-detect",  # Will be detected by VTA analyzer
         "Roots": [str(ctx.label)],
         "Packages": all_packages
     }
     
     return json.encode(response)
 
-def _get_stdlib_packages():
-    """Return standard library package definitions for VTA analysis."""
-    return [
-        {
-            "ID": "fmt",
-            "Name": "fmt",
-            "PkgPath": "fmt",
-            "ExportFile": "__BAZEL_EXECROOT__/external/go_sdk/pkg/darwin_arm64/fmt.a",
-            "GoFiles": ["__BAZEL_EXECROOT__/external/go_sdk/src/fmt/print.go"],
-            "CompiledGoFiles": ["__BAZEL_EXECROOT__/external/go_sdk/src/fmt/print.go"],
-            "Imports": {"errors": "errors", "io": "io", "os": "os", "reflect": "reflect", "strconv": "strconv", "sync": "sync", "unicode/utf8": "unicode/utf8"},
-        },
-        {
-            "ID": "context",
-            "Name": "context",
-            "PkgPath": "context",
-            "ExportFile": "__BAZEL_EXECROOT__/external/go_sdk/pkg/darwin_arm64/context.a",
-            "GoFiles": ["__BAZEL_EXECROOT__/external/go_sdk/src/context/context.go"],
-            "CompiledGoFiles": ["__BAZEL_EXECROOT__/external/go_sdk/src/context/context.go"],
-            "Imports": {"errors": "errors", "fmt": "fmt", "reflect": "reflect", "sort": "sort", "sync": "sync", "time": "time"},
-        },
-        {
-            "ID": "net/http",
-            "Name": "http",
-            "PkgPath": "net/http",
-            "ExportFile": "__BAZEL_EXECROOT__/external/go_sdk/pkg/darwin_arm64/net/http.a",
-            "GoFiles": ["__BAZEL_EXECROOT__/external/go_sdk/src/net/http/client.go"],
-            "CompiledGoFiles": ["__BAZEL_EXECROOT__/external/go_sdk/src/net/http/client.go"],
-            "Imports": {"bufio": "bufio", "context": "context", "crypto/tls": "crypto/tls", "errors": "errors", "fmt": "fmt", "io": "io", "net": "net", "net/url": "net/url", "sort": "sort", "strconv": "strconv", "strings": "strings", "sync": "sync", "time": "time"},
-        }
-    ]
-
+# Removed hardcoded stdlib packages - VTA analyzer will discover them dynamically
 def _endor_go_binary_get_callgraph_metadata(target, ctx):
     """Extract callgraph metadata from Go binary targets using VTA analyzer."""
     if not hasattr(target, "files") and not hasattr(ctx, "attr"):

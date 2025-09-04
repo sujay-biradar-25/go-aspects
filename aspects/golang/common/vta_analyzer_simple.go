@@ -10,14 +10,29 @@ import (
 	"strings"
 )
 
+type FunctionInfo struct {
+	Name       string   `json:"name"`
+	Package    string   `json:"package"`
+	Signature  string   `json:"signature"`
+	Parameters []string `json:"parameters"`
+	Returns    []string `json:"returns"`
+}
+
+type CallEdge struct {
+	Caller FunctionInfo `json:"caller"`
+	Callee FunctionInfo `json:"callee"`
+}
+
 type CallGraphResult struct {
-	PackageID   string              `json:"package_id"`
-	PackageName string              `json:"package_name"`
-	ImportPath  string              `json:"import_path"`
-	CallGraph   map[string][]string `json:"call_graph"`
-	TotalFuncs  int                 `json:"total_functions"`
-	TotalEdges  int                 `json:"total_edges"`
-	Algorithm   string              `json:"algorithm"`
+	PackageID   string                  `json:"package_id"`
+	PackageName string                  `json:"package_name"`
+	ImportPath  string                  `json:"import_path"`
+	CallGraph   map[string][]string     `json:"call_graph"` // Legacy format
+	Functions   map[string]FunctionInfo `json:"functions"`  // Function signatures
+	CallEdges   []CallEdge              `json:"call_edges"` // Enhanced call relationships
+	TotalFuncs  int                     `json:"total_functions"`
+	TotalEdges  int                     `json:"total_edges"`
+	Algorithm   string                  `json:"algorithm"`
 }
 
 func main() {
@@ -88,7 +103,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "🏠 Workspace root: %s\n", workspaceRoot)
 
 	// Create a temporary script to run VTA analysis in the workspace context
-	result := runWorkspaceVTAAnalysis(workspaceRoot, targetPkgPath, targetID, targetName)
+	result := runWorkspaceVTAAnalysis(workspaceRoot, packagesFile, targetPkgPath, targetID, targetName)
 
 	// Write result
 	writeResult(outputFile, result)
@@ -123,10 +138,10 @@ func findWorkspaceRoot() string {
 	return ""
 }
 
-func runWorkspaceVTAAnalysis(workspaceRoot, targetPkgPath, targetID, targetName string) CallGraphResult {
+func runWorkspaceVTAAnalysis(workspaceRoot, packagesFile, targetPkgPath, targetID, targetName string) CallGraphResult {
 	fmt.Fprintf(os.Stderr, "🔄 Running VTA analysis in workspace context\n")
 
-	// Create a simple Go script to run VTA analysis
+	// Create a dynamic Go script to run VTA analysis with runtime environment detection
 	vtaScript := `
 package main
 
@@ -134,32 +149,111 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
+	"strings"
 	"golang.org/x/tools/go/callgraph/cha"
 	"golang.org/x/tools/go/callgraph/vta"
 	"golang.org/x/tools/go/packages"
+	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
+type FunctionInfo struct {
+	Name       string   ` + "`json:\"name\"`" + `
+	Package    string   ` + "`json:\"package\"`" + `
+	Signature  string   ` + "`json:\"signature\"`" + `
+	Parameters []string ` + "`json:\"parameters\"`" + `
+	Returns    []string ` + "`json:\"returns\"`" + `
+}
+
+type CallEdge struct {
+	Caller FunctionInfo ` + "`json:\"caller\"`" + `
+	Callee FunctionInfo ` + "`json:\"callee\"`" + `
+}
+
 type CallGraphResult struct {
-	PackageID    string              ` + "`json:\"package_id\"`" + `
-	PackageName  string              ` + "`json:\"package_name\"`" + `
-	ImportPath   string              ` + "`json:\"import_path\"`" + `
-	CallGraph    map[string][]string ` + "`json:\"call_graph\"`" + `
-	TotalFuncs   int                 ` + "`json:\"total_functions\"`" + `
-	TotalEdges   int                 ` + "`json:\"total_edges\"`" + `
-	Algorithm    string              ` + "`json:\"algorithm\"`" + `
+	PackageID     string                     ` + "`json:\"package_id\"`" + `
+	PackageName   string                     ` + "`json:\"package_name\"`" + `
+	ImportPath    string                     ` + "`json:\"import_path\"`" + `
+	CallGraph     map[string][]string        ` + "`json:\"call_graph\"`" + `
+	Functions     map[string]FunctionInfo    ` + "`json:\"functions\"`" + `
+	CallEdges     []CallEdge                 ` + "`json:\"call_edges\"`" + `
+	TotalFuncs    int                        ` + "`json:\"total_functions\"`" + `
+	TotalEdges    int                        ` + "`json:\"total_edges\"`" + `
+	Algorithm     string                     ` + "`json:\"algorithm\"`" + `
 }
 
 func main() {
+	// Read the packages JSON metadata from stdin or first argument
+	var responseData []byte
+	var err error
+	
+	if len(os.Args) > 1 {
+		// Read from file if argument provided
+		responseData, err = os.ReadFile(os.Args[1])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to read packages file: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Usage: program <packages.json>\n")
+		os.Exit(1)
+	}
+	
+	// Parse the packages JSON response from Bazel
+	var response struct {
+		Roots    []string ` + "`json:\"Roots\"`" + `
+		Packages []struct {
+			ID      string   ` + "`json:\"ID\"`" + `
+			Name    string   ` + "`json:\"Name\"`" + `
+			PkgPath string   ` + "`json:\"PkgPath\"`" + `
+			GoFiles []string ` + "`json:\"GoFiles\"`" + `
+		} ` + "`json:\"Packages\"`" + `
+	}
+	
+	if err := json.Unmarshal(responseData, &response); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to parse packages JSON: %v\n", err)
+		os.Exit(1)
+	}
+	
+	fmt.Fprintf(os.Stderr, "🎯 Target roots: %v\n", response.Roots)
+
+	// Detect runtime environment
+	goarch := runtime.GOARCH
+	goos := runtime.GOOS
+	fmt.Fprintf(os.Stderr, "🏗️ Detected Go environment: %s/%s\n", goos, goarch)
+	
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 			packages.NeedImports | packages.NeedDeps | packages.NeedExportFile |
 			packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo |
 			packages.NeedTypesSizes,
 		Tests: false,
+		Env: append(os.Environ(), 
+			"GOOS=" + goos,
+			"GOARCH=" + goarch,
+		),
 	}
 
-	pkgs, err := packages.Load(cfg, "./src/main", "./src/utils")
+	// Extract package paths from the JSON metadata provided by Bazel
+	packagePaths := make([]string, 0)
+	for _, pkg := range response.Packages {
+		if pkg.ID != "" && (strings.HasPrefix(pkg.ID, "@@//") || strings.HasPrefix(pkg.ID, "@//")) {
+			// Convert Bazel package path to Go module path
+			pkgPath := "./" + pkg.PkgPath
+			packagePaths = append(packagePaths, pkgPath)
+			fmt.Fprintf(os.Stderr, "📦 Will analyze package: %s (from %s)\n", pkgPath, pkg.ID)
+		}
+	}
+	
+	// If no packages found, fallback to current directory
+	if len(packagePaths) == 0 {
+		packagePaths = []string{"."}
+		fmt.Fprintf(os.Stderr, "⚠️ No packages found in Bazel context, using current directory\n")
+	}
+	
+	fmt.Fprintf(os.Stderr, "🔄 Loading %d packages: %v\n", len(packagePaths), packagePaths)
+	pkgs, err := packages.Load(cfg, packagePaths...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load packages: %v\n", err)
 		os.Exit(1)
@@ -196,7 +290,86 @@ func main() {
 	vtaCG := vta.CallGraph(allFuncs, chaCG)
 	vtaCG.DeleteSyntheticNodes()
 
+	// Helper function to extract function signature
+	extractFunctionInfo := func(fn *ssa.Function) FunctionInfo {
+		if fn == nil {
+			return FunctionInfo{Name: "unknown", Package: "unknown", Signature: "unknown()"}
+		}
+		
+		var funcName, pkgPath string
+		if fn.Pkg != nil && fn.Pkg.Pkg != nil {
+			pkgPath = fn.Pkg.Pkg.Path()
+			funcName = fmt.Sprintf("%s.%s", pkgPath, fn.Name())
+		} else {
+			funcName = fn.Name()
+			pkgPath = "builtin"
+		}
+		
+		// Extract parameters and return types
+		var parameters, returns []string
+		signature := ""
+		
+		if fn.Signature != nil {
+			sig := fn.Signature
+			
+			// Extract parameters
+			if sig.Params() != nil {
+				for i := 0; i < sig.Params().Len(); i++ {
+					param := sig.Params().At(i)
+					paramType := param.Type().String()
+					paramName := param.Name()
+					if paramName != "" {
+						parameters = append(parameters, fmt.Sprintf("%s %s", paramName, paramType))
+					} else {
+						parameters = append(parameters, paramType)
+					}
+				}
+			}
+			
+			// Extract return types
+			if sig.Results() != nil {
+				for i := 0; i < sig.Results().Len(); i++ {
+					result := sig.Results().At(i)
+					resultType := result.Type().String()
+					resultName := result.Name()
+					if resultName != "" {
+						returns = append(returns, fmt.Sprintf("%s %s", resultName, resultType))
+					} else {
+						returns = append(returns, resultType)
+					}
+				}
+			}
+			
+			// Build full signature
+			paramStr := strings.Join(parameters, ", ")
+			returnStr := ""
+			if len(returns) == 1 {
+				returnStr = returns[0]
+			} else if len(returns) > 1 {
+				returnStr = "(" + strings.Join(returns, ", ") + ")"
+			}
+			
+			if returnStr != "" {
+				signature = fmt.Sprintf("%s(%s) %s", fn.Name(), paramStr, returnStr)
+			} else {
+				signature = fmt.Sprintf("%s(%s)", fn.Name(), paramStr)
+			}
+		} else {
+			signature = fn.Name() + "()"
+		}
+		
+		return FunctionInfo{
+			Name:       funcName,
+			Package:    pkgPath,
+			Signature:  signature,
+			Parameters: parameters,
+			Returns:    returns,
+		}
+	}
+
 	callGraph := make(map[string][]string)
+	functions := make(map[string]FunctionInfo)
+	var callEdges []CallEdge
 	totalEdges := 0
 
 	for fn, node := range vtaCG.Nodes {
@@ -204,12 +377,8 @@ func main() {
 			continue
 		}
 
-		var funcName string
-		if fn.Pkg != nil && fn.Pkg.Pkg != nil {
-			funcName = fmt.Sprintf("%s.%s", fn.Pkg.Pkg.Path(), fn.Name())
-		} else {
-			funcName = fn.Name()
-		}
+		callerInfo := extractFunctionInfo(fn)
+		functions[callerInfo.Name] = callerInfo
 
 		var callees []string
 		for _, edge := range node.Out {
@@ -217,18 +386,19 @@ func main() {
 				continue
 			}
 
-			var calleeName string
-			if edge.Callee.Func.Pkg != nil && edge.Callee.Func.Pkg.Pkg != nil {
-				calleeName = fmt.Sprintf("%s.%s", edge.Callee.Func.Pkg.Pkg.Path(), edge.Callee.Func.Name())
-			} else {
-				calleeName = edge.Callee.Func.Name()
-			}
-			callees = append(callees, calleeName)
+			calleeInfo := extractFunctionInfo(edge.Callee.Func)
+			functions[calleeInfo.Name] = calleeInfo
+			
+			callees = append(callees, calleeInfo.Name)
+			callEdges = append(callEdges, CallEdge{
+				Caller: callerInfo,
+				Callee: calleeInfo,
+			})
 			totalEdges++
 		}
 
 		if len(callees) > 0 {
-			callGraph[funcName] = callees
+			callGraph[callerInfo.Name] = callees
 		}
 	}
 
@@ -237,6 +407,8 @@ func main() {
 		PackageName: "` + targetName + `",
 		ImportPath: "` + targetPkgPath + `",
 		CallGraph: callGraph,
+		Functions: functions,
+		CallEdges: callEdges,
 		TotalFuncs: len(callGraph),
 		TotalEdges: totalEdges,
 		Algorithm: "VTA",
@@ -262,26 +434,29 @@ func main() {
 	}
 	defer os.Remove(tmpFile)
 
-	// Run the script in the workspace directory
-	cmd := exec.Command("go", "run", tmpFile)
-	cmd.Dir = workspaceRoot
-	env := os.Environ()
-	env = append(env, "GO111MODULE=on")
-	env = append(env, "GOCACHE="+filepath.Join(os.TempDir(), "gocache"))
-	env = append(env, "GOMODCACHE="+filepath.Join(os.TempDir(), "gomodcache"))
-
-	// Ensure HOME is set for Go toolchain download
-	homeSet := false
-	for _, envVar := range env {
-		if strings.HasPrefix(envVar, "HOME=") {
-			homeSet = true
-			break
+	// Convert packages file to absolute path since we're changing working directory
+	absPackagesFile, err := filepath.Abs(packagesFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to get absolute path for packages file: %v\n", err)
+		return CallGraphResult{
+			PackageID:   targetID,
+			PackageName: targetName,
+			ImportPath:  targetPkgPath,
+			CallGraph:   make(map[string][]string),
+			Functions:   make(map[string]FunctionInfo),
+			CallEdges:   []CallEdge{},
+			TotalFuncs:  0,
+			TotalEdges:  0,
+			Algorithm:   "VTA",
 		}
 	}
-	if !homeSet {
-		env = append(env, "HOME="+os.TempDir())
-	}
 
+	// Run the script in the workspace directory with dynamic Go environment detection
+	cmd := exec.Command("go", "run", tmpFile, absPackagesFile)
+	cmd.Dir = workspaceRoot
+
+	// Build environment with runtime Go detection
+	env := buildDynamicGoEnvironment()
 	cmd.Env = env
 
 	output, err := cmd.Output()
@@ -318,6 +493,84 @@ func main() {
 
 	fmt.Fprintf(os.Stderr, "✅ VTA analysis completed: %d functions, %d edges\n", result.TotalFuncs, result.TotalEdges)
 	return result
+}
+
+func buildDynamicGoEnvironment() []string {
+	env := os.Environ()
+
+	// Detect Go environment at runtime
+	goVersion, _ := exec.Command("go", "version").Output()
+	fmt.Fprintf(os.Stderr, "🔧 Go version: %s", string(goVersion))
+
+	// Get Go environment variables dynamically
+	if goroot, err := exec.Command("go", "env", "GOROOT").Output(); err == nil {
+		env = append(env, "GOROOT="+strings.TrimSpace(string(goroot)))
+		fmt.Fprintf(os.Stderr, "🏠 GOROOT: %s\n", strings.TrimSpace(string(goroot)))
+	}
+
+	if gopath, err := exec.Command("go", "env", "GOPATH").Output(); err == nil {
+		env = append(env, "GOPATH="+strings.TrimSpace(string(gopath)))
+		fmt.Fprintf(os.Stderr, "📁 GOPATH: %s\n", strings.TrimSpace(string(gopath)))
+	}
+
+	if goos, err := exec.Command("go", "env", "GOOS").Output(); err == nil {
+		env = append(env, "GOOS="+strings.TrimSpace(string(goos)))
+		fmt.Fprintf(os.Stderr, "🖥️ GOOS: %s\n", strings.TrimSpace(string(goos)))
+	}
+
+	if goarch, err := exec.Command("go", "env", "GOARCH").Output(); err == nil {
+		env = append(env, "GOARCH="+strings.TrimSpace(string(goarch)))
+		fmt.Fprintf(os.Stderr, "🏗️ GOARCH: %s\n", strings.TrimSpace(string(goarch)))
+	}
+
+	if gomod, err := exec.Command("go", "env", "GOMODCACHE").Output(); err == nil {
+		modCache := strings.TrimSpace(string(gomod))
+		if modCache != "" {
+			env = append(env, "GOMODCACHE="+modCache)
+			fmt.Fprintf(os.Stderr, "📦 GOMODCACHE: %s\n", modCache)
+		}
+	} else {
+		// Fallback
+		env = append(env, "GOMODCACHE="+filepath.Join(os.TempDir(), "gomodcache"))
+	}
+
+	if gocache, err := exec.Command("go", "env", "GOCACHE").Output(); err == nil {
+		cache := strings.TrimSpace(string(gocache))
+		if cache != "" && cache != "off" {
+			env = append(env, "GOCACHE="+cache)
+			fmt.Fprintf(os.Stderr, "🗂️ GOCACHE: %s\n", cache)
+		} else {
+			// Cache is disabled, enable it with temp directory
+			tempCache := filepath.Join(os.TempDir(), "vta-gocache")
+			env = append(env, "GOCACHE="+tempCache)
+			fmt.Fprintf(os.Stderr, "🗂️ GOCACHE: %s (temporary, was %s)\n", tempCache, cache)
+		}
+	} else {
+		// Fallback
+		tempCache := filepath.Join(os.TempDir(), "vta-gocache")
+		env = append(env, "GOCACHE="+tempCache)
+		fmt.Fprintf(os.Stderr, "🗂️ GOCACHE: %s (fallback)\n", tempCache)
+	}
+
+	env = append(env, "GO111MODULE=on")
+
+	// Ensure HOME is set
+	homeSet := false
+	for _, envVar := range env {
+		if strings.HasPrefix(envVar, "HOME=") {
+			homeSet = true
+			break
+		}
+	}
+	if !homeSet {
+		if userHome, err := os.UserHomeDir(); err == nil {
+			env = append(env, "HOME="+userHome)
+		} else {
+			env = append(env, "HOME="+os.TempDir())
+		}
+	}
+
+	return env
 }
 
 func writeResult(outputFile string, result CallGraphResult) {
